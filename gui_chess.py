@@ -8,22 +8,63 @@ SQ_SIZE = WIDTH // 8
 
 IMAGES = {}
 
-# ------------------------------
-# Load images
-# ------------------------------
+# -------------------------------------
+# Promotion Helper
+# -------------------------------------
+
+def is_promotion_move(board, from_sq, to_sq):
+    piece = board.piece_at(from_sq)
+    if piece is None or piece.piece_type != chess.PAWN:
+        return False
+
+    rank = chess.square_rank(to_sq)
+    return (piece.color == chess.WHITE and rank == 7) or \
+           (piece.color == chess.BLACK and rank == 0)
+
+
+def draw_promotion_menu(screen, color, col, gui_row):
+    menu_width = SQ_SIZE
+    menu_height = 4 * SQ_SIZE
+
+    # White promotions appear *below* the destination square
+    # Black promotions appear *above*
+    if color == chess.WHITE:
+        y = gui_row * SQ_SIZE
+    else:
+        y = gui_row * SQ_SIZE - (3 * SQ_SIZE)
+
+    x = col * SQ_SIZE
+
+    pygame.draw.rect(screen, (230, 230, 230), (x, y, menu_width, menu_height))
+
+    pieces = ["q", "r", "b", "n"]
+
+    for i, p in enumerate(pieces):
+        key = ("w" if color == chess.WHITE else "b") + p
+        img = IMAGES[key]
+        screen.blit(img, pygame.Rect(x, y + i * SQ_SIZE, SQ_SIZE, SQ_SIZE))
+
+    pygame.display.flip()
+
+    # clickable regions
+    return [(x, y + i * SQ_SIZE, SQ_SIZE, SQ_SIZE, pieces[i]) for i in range(4)]
+
+# -------------------------------------
+# Load Images
+# -------------------------------------
 
 def load_images():
     pieces = ["wp", "wn", "wb", "wr", "wq", "wk",
               "bp", "bn", "bb", "br", "bq", "bk"]
+
     for p in pieces:
         IMAGES[p] = pygame.transform.scale(
-            pygame.image.load(f"pieces/{p}.png"),
-            (SQ_SIZE, SQ_SIZE)
+            pygame.image.load(f"pieces/{p}.png"), (SQ_SIZE, SQ_SIZE)
         )
 
-# ------------------------------
-# Drawing
-# ------------------------------
+# -------------------------------------
+# Drawing Functions
+# -------------------------------------
 
 def draw_board(screen):
     colors = [(240, 217, 181), (181, 136, 99)]
@@ -35,6 +76,7 @@ def draw_board(screen):
                 pygame.Rect(c * SQ_SIZE, r * SQ_SIZE, SQ_SIZE, SQ_SIZE)
             )
 
+
 def draw_pieces(screen, board):
     for square, piece in board.piece_map().items():
         col = chess.square_file(square)
@@ -43,31 +85,30 @@ def draw_pieces(screen, board):
         img = IMAGES["w" + symbol.lower()] if symbol.isupper() else IMAGES["b" + symbol.lower()]
         screen.blit(img, pygame.Rect(col * SQ_SIZE, row * SQ_SIZE, SQ_SIZE, SQ_SIZE))
 
+
 def highlight_squares(screen, board, selected_square):
     if selected_square is None:
         return
 
-    # selected square
     col = chess.square_file(selected_square)
     row = 7 - chess.square_rank(selected_square)
 
     s = pygame.Surface((SQ_SIZE, SQ_SIZE))
     s.set_alpha(120)
-    s.fill((246, 246, 105))  # light yellow
+    s.fill((246, 246, 105))
     screen.blit(s, (col * SQ_SIZE, row * SQ_SIZE))
 
-    # legal moves from that square
+    # show legal moves
     for move in board.legal_moves:
         if move.from_square == selected_square:
-            dest_c = chess.square_file(move.to_square)
-            dest_r = 7 - chess.square_rank(move.to_square)
-            center = (dest_c * SQ_SIZE + SQ_SIZE // 2,
-                      dest_r * SQ_SIZE + SQ_SIZE // 2)
+            dc = chess.square_file(move.to_square)
+            dr = 7 - chess.square_rank(move.to_square)
+            center = (dc * SQ_SIZE + SQ_SIZE // 2, dr * SQ_SIZE + SQ_SIZE // 2)
             pygame.draw.circle(screen, (50, 50, 50), center, 12)
 
-# ------------------------------
-# Evaluation
-# ------------------------------
+# -------------------------------------
+# Evaluation (as before)
+# -------------------------------------
 
 PIECE_VALUES = {
     chess.PAWN: 100,
@@ -75,7 +116,7 @@ PIECE_VALUES = {
     chess.BISHOP: 330,
     chess.ROOK: 500,
     chess.QUEEN: 900,
-    chess.KING: 0,  # king safety handled via game termination
+    chess.KING: 0,
 }
 
 CENTER_SQUARES = {
@@ -88,121 +129,85 @@ EXTENDED_CENTER = {
     chess.C6, chess.D6, chess.E6, chess.F6
 }
 
-def evaluate_board(board: chess.Board) -> int:
-    """
-    Static eval from the perspective of the side to move.
-    Positive is good for the side to move, negative is bad.
-    Units are "centipawns".
-    """
-
-    # terminal positions
+def evaluate_board(board):
     if board.is_checkmate():
-        # side to move is checkmated, so very bad
         return -10_000
-    if board.is_stalemate() or board.is_insufficient_material() \
-       or board.is_seventyfive_moves() or board.is_fivefold_repetition():
+    if board.is_stalemate() or board.is_insufficient_material():
         return 0
 
-    material_white = 0
-    material_black = 0
-    center_bonus_white = 0
-    center_bonus_black = 0
+    material_white = material_black = 0
+    center_white = center_black = 0
 
     for square, piece in board.piece_map().items():
-        val = PIECE_VALUES[piece.piece_type]
-
-        # center control: reward pieces on central squares
-        center_bonus = 0
-        if square in CENTER_SQUARES:
-            center_bonus = 20
-        elif square in EXTENDED_CENTER:
-            center_bonus = 10
+        v = PIECE_VALUES[piece.piece_type]
+        bonus = 20 if square in CENTER_SQUARES else 10 if square in EXTENDED_CENTER else 0
 
         if piece.color == chess.WHITE:
-            material_white += val
-            center_bonus_white += center_bonus
+            material_white += v
+            center_white += bonus
         else:
-            material_black += val
-            center_bonus_black += center_bonus
+            material_black += v
+            center_black += bonus
 
-    material_score = material_white - material_black
-    center_score = center_bonus_white - center_bonus_black
+    score = (material_white - material_black) + (center_white - center_black)
 
-    # mobility: difference in legal moves
-    mobility_score = 0
-    side_to_move_legal = board.legal_moves.count()
+    # mobility
+    my_moves = board.legal_moves.count()
     board.push(chess.Move.null())
-    opponent_legal = board.legal_moves.count()
+    opp_moves = board.legal_moves.count()
     board.pop()
-    mobility_score = 5 * (side_to_move_legal - opponent_legal)
 
-    total_from_white = material_score + center_score + mobility_score
+    score += 5 * (my_moves - opp_moves)
 
-    if board.turn == chess.WHITE:
-        return total_from_white
-    else:
-        return -total_from_white
+    return score if board.turn == chess.WHITE else -score
 
-# ------------------------------
-# Negamax + alpha beta
-# ------------------------------
+# -------------------------------------
+# Engine
+# -------------------------------------
 
-def ordered_moves(board: chess.Board):
-    """
-    Simple move ordering: captures and promotions first.
-    """
+def ordered_moves(board):
     moves = list(board.legal_moves)
 
-    def score_move(m: chess.Move):
+    def mv_score(m):
         score = 0
         if board.is_capture(m):
             score += 10_000
-        if m.promotion is not None:
+        if m.promotion:
             score += 5_000
-        # small bonus for moves towards the center
-        to_sq = m.to_square
-        if to_sq in CENTER_SQUARES:
+        if m.to_square in CENTER_SQUARES:
             score += 500
-        elif to_sq in EXTENDED_CENTER:
-            score += 200
         return score
 
-    moves.sort(key=score_move, reverse=True)
+    moves.sort(key=mv_score, reverse=True)
     return moves
 
-def negamax(board: chess.Board, depth: int, alpha: int, beta: int) -> int:
-    """
-    Negamax search with alpha beta pruning.
-    Returns a score from the perspective of the side to move.
-    """
+
+def negamax(board, depth, alpha, beta):
     if depth == 0 or board.is_game_over():
         return evaluate_board(board)
 
-    max_score = -math.inf
+    maxv = -math.inf
 
     for move in ordered_moves(board):
         board.push(move)
         score = -negamax(board, depth - 1, -beta, -alpha)
         board.pop()
 
-        if score > max_score:
-            max_score = score
+        if score > maxv:
+            maxv = score
         if score > alpha:
             alpha = score
         if alpha >= beta:
             break
 
-    return max_score
+    return maxv
 
-# ------------------------------
-# AI Player
-# ------------------------------
 
 class AIPlayer:
-    def __init__(self, depth: int = 3):
+    def __init__(self, depth=3):
         self.depth = depth
 
-    def choose_move(self, board: chess.Board) -> chess.Move | None:
+    def choose_move(self, board):
         best_move = None
         best_score = -math.inf
 
@@ -211,15 +216,15 @@ class AIPlayer:
             score = -negamax(board, self.depth - 1, -math.inf, math.inf)
             board.pop()
 
-            if score > best_score or best_move is None:
+            if score > best_score:
                 best_score = score
                 best_move = move
 
         return best_move
 
-# ------------------------------
-# Main Game Loop
-# ------------------------------
+# -------------------------------------
+# Main
+# -------------------------------------
 
 def main():
     pygame.init()
@@ -228,55 +233,85 @@ def main():
 
     board = chess.Board()
     load_images()
-
-    # human plays White, AI plays Black
-    human_plays_white = True
     ai = AIPlayer(depth=3)
 
     selected_square = None
-    running = True
+    promoting = False
+    promotion_from = None
+    promotion_to = None
+    promotion_boxes = []
 
     clock = pygame.time.Clock()
+    running = True
 
     while running:
-        clock.tick(60)  # limit FPS a bit
+        clock.tick(60)
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
 
-            # human move (white)
-            if event.type == pygame.MOUSEBUTTONDOWN:
-                if board.turn == chess.WHITE and human_plays_white and not board.is_game_over():
-                    x, y = event.pos
-                    row = y // SQ_SIZE
-                    col = x // SQ_SIZE
-                    square = chess.square(col, 7 - row)
+            # If we are in promotion mode, only clicks for promotion matter:
+            if promoting and event.type == pygame.MOUSEBUTTONDOWN:
+                mx, my = event.pos
+                for (x, y, w, h, p) in promotion_boxes:
+                    if x <= mx <= x + w and y <= my <= y + h:
+                        move = chess.Move(
+                            promotion_from,
+                            promotion_to,
+                            promotion={"q": chess.QUEEN, "r": chess.ROOK,
+                                       "b": chess.BISHOP, "n": chess.KNIGHT}[p]
+                        )
+                        if move in board.legal_moves:
+                            board.push(move)
+                        promoting = False
+                        selected_square = None
+                continue  # don't process anything else while promoting
 
-                    if selected_square is None:
-                        # only allow selecting your own pieces
-                        piece = board.piece_at(square)
-                        if piece is not None and piece.color == chess.WHITE:
-                            selected_square = square
+            # Normal click handling
+            if event.type == pygame.MOUSEBUTTONDOWN and not promoting:
+                mx, my = event.pos
+                row = my // SQ_SIZE
+                col = mx // SQ_SIZE
+                clicked_square = chess.square(col, 7 - row)
+
+                if selected_square is None:
+                    piece = board.piece_at(clicked_square)
+                    if piece and piece.color == board.turn:
+                        selected_square = clicked_square
+                else:
+                    # Check promotion
+                    if is_promotion_move(board, selected_square, clicked_square):
+                        promoting = True
+                        promotion_from = selected_square
+                        promotion_to = clicked_square
+                        promotion_boxes = draw_promotion_menu(
+                            screen,
+                            board.turn,
+                            col,
+                            row  # gui row
+                        )
                     else:
-                        move = chess.Move(selected_square, square)
+                        move = chess.Move(selected_square, clicked_square)
                         if move in board.legal_moves:
                             board.push(move)
                         selected_square = None
 
-        # AI move (black)
-        if not board.is_game_over():
-            if board.turn == chess.BLACK and human_plays_white:
-                ai_move = ai.choose_move(board)
-                if ai_move is not None:
-                    board.push(ai_move)
+        # AI move
+        if not promoting and not board.is_game_over() and board.turn == chess.BLACK:
+            ai_move = ai.choose_move(board)
+            if ai_move:
+                board.push(ai_move)
 
-        draw_board(screen)
-        highlight_squares(screen, board, selected_square)
-        draw_pieces(screen, board)
-        pygame.display.flip()
+        # Draw board unless promotion menu is active
+        if not promoting:
+            draw_board(screen)
+            highlight_squares(screen, board, selected_square)
+            draw_pieces(screen, board)
+            pygame.display.flip()
 
     pygame.quit()
+
 
 if __name__ == "__main__":
     main()
