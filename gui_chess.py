@@ -130,6 +130,7 @@ EXTENDED_CENTER = {
 }
 
 def evaluate_board(board):
+    # Terminal states
     if board.is_checkmate():
         return -10_000
     if board.is_stalemate() or board.is_insufficient_material():
@@ -138,6 +139,7 @@ def evaluate_board(board):
     material_white = material_black = 0
     center_white = center_black = 0
 
+    # Material + center control
     for square, piece in board.piece_map().items():
         v = PIECE_VALUES[piece.piece_type]
         bonus = 20 if square in CENTER_SQUARES else 10 if square in EXTENDED_CENTER else 0
@@ -151,15 +153,38 @@ def evaluate_board(board):
 
     score = (material_white - material_black) + (center_white - center_black)
 
-    # mobility
+    # Mobility
     my_moves = board.legal_moves.count()
     board.push(chess.Move.null())
     opp_moves = board.legal_moves.count()
     board.pop()
-
     score += 5 * (my_moves - opp_moves)
 
+    # -----------------------------
+    # King safety improvements
+    # -----------------------------
+
+    wk = board.king(chess.WHITE)
+    bk = board.king(chess.BLACK)
+
+    # 1. Castling bonus
+    # Detect if white has already castled
+    if wk in (chess.G1, chess.C1):
+        score += 40
+    # Detect if black has already castled
+    if bk in (chess.G8, chess.C8):
+        score -= 40  # subtract since positive is good for white
+
+    # 2. Penalize king stuck in the center after move 10
+    if board.fullmove_number > 10:
+        if wk in (chess.E1, chess.D1, chess.F1):
+            score -= 30
+        if bk in (chess.E8, chess.D8, chess.F8):
+            score += 30  # again reversed because score is from white's view
+
+    # Return relative to side to move
     return score if board.turn == chess.WHITE else -score
+
 
 # -------------------------------------
 # Engine
