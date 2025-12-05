@@ -8,6 +8,15 @@ from tensorflow.keras.models import load_model
 from functools import lru_cache
 
 # ============================================
+# Engine Metrics
+# ============================================
+
+NODES_SEARCHED = 0
+NODES_PRUNED = 0
+NN_EVAL_COUNT = 0
+
+
+# ============================================
 # Global Settings
 # ============================================
 
@@ -19,6 +28,7 @@ IMAGES = {}
 
 # Quiescence depth limit to avoid explosion
 QUIESCENCE_DEPTH = 4
+
 
 
 # ============================================
@@ -218,55 +228,246 @@ EXT_CENTER = {
 }
 
 
+# def static_eval(board: chess.Board) -> int:
+#     """
+#     Returns score in centipawns from the side-to-move perspective.
+#     Positive means good for the side to move.
+#     """
+#     if board.is_checkmate():
+#         return -100000
+#     if board.is_stalemate() or board.is_insufficient_material():
+#         return 0
+
+#     w_mat = b_mat = 0
+#     w_center = b_center = 0
+
+#     for sq, pc in board.piece_map().items():
+#         v = PIECE_VALUES[pc.piece_type]
+#         bonus = 20 if sq in CENTER else 10 if sq in EXT_CENTER else 0
+
+#         if pc.color == chess.WHITE:
+#             w_mat += v
+#             w_center += bonus
+#         else:
+#             b_mat += v
+#             b_center += bonus
+
+#     score = (w_mat - b_mat) + (w_center - b_center)
+
+#     # Mobility
+#     my_moves = board.legal_moves.count()
+#     board.push(chess.Move.null())
+#     opp_moves = board.legal_moves.count()
+#     board.pop()
+
+#     score += 5 * (my_moves - opp_moves)
+
+#     # Castling bonus
+#     wk = board.king(chess.WHITE)
+#     bk = board.king(chess.BLACK)
+
+#     if wk in (chess.G1, chess.C1):
+#         score += 40
+#     if bk in (chess.G8, chess.C8):
+#         score -= 40
+
+#     if board.fullmove_number > 10:
+#         if wk in (chess.E1, chess.D1, chess.F1):
+#             score -= 30
+#         if bk in (chess.E8, chess.D8, chess.F8):
+#             score += 30
+
+#     return score if board.turn == chess.WHITE else -score
+
+
 def static_eval(board: chess.Board) -> int:
     """
-    Returns score in centipawns from the side-to-move perspective.
-    Positive means good for the side to move.
+    Static evaluation with positional + tactical heuristics.
+    Returns score from side-to-move perspective.
     """
+
     if board.is_checkmate():
         return -100000
     if board.is_stalemate() or board.is_insufficient_material():
         return 0
 
-    w_mat = b_mat = 0
-    w_center = b_center = 0
+    score = 0
 
-    for sq, pc in board.piece_map().items():
-        v = PIECE_VALUES[pc.piece_type]
-        bonus = 20 if sq in CENTER else 10 if sq in EXT_CENTER else 0
+    PIECE_VALUE = {
+        chess.PAWN: 100,
+        chess.KNIGHT: 320,
+        chess.BISHOP: 330,
+        chess.ROOK: 500,
+        chess.QUEEN: 900,
+        chess.KING: 0
+    }
 
-        if pc.color == chess.WHITE:
-            w_mat += v
-            w_center += bonus
-        else:
-            b_mat += v
-            b_center += bonus
+    # Pawn structure trackers
+    pawn_files_white = {}
+    pawn_files_black = {}
 
-    score = (w_mat - b_mat) + (w_center - b_center)
+    # Track attacked and defended squares
+    attacked_by_white = [False] * 64
+    attacked_by_black = [False] * 64
+    defended_by_white = [False] * 64
+    defended_by_black = [False] * 64
 
-    # Mobility
+    for sq in range(64):
+        attacked_by_white[sq] = board.is_attacked_by(chess.WHITE, sq)
+        attacked_by_black[sq] = board.is_attacked_by(chess.BLACK, sq)
+
+        defended_by_white[sq] = board.is_attacked_by(chess.WHITE, sq)
+        defended_by_black[sq] = board.is_attacked_by(chess.BLACK, sq)
+
+    def piece_value(p): return PIECE_VALUE[p.piece_type]
+
+    # =============================================
+    # 1. MATERIAL + POSITIONAL FEATURES
+    # =============================================
+    for square, piece in board.piece_map().items():
+        color = 1 if piece.color == chess.WHITE else -1
+        pt = piece.piece_type
+        val = PIECE_VALUE[pt]
+
+        # Material
+        score += color * val
+
+        # Center control
+        if square in [chess.D4, chess.E4, chess.D5, chess.E5]:
+            score += color * 20
+        elif square in [
+            chess.C3, chess.C4, chess.C5, chess.C6,
+            chess.D3, chess.E3, chess.F3,
+            chess.F4, chess.F5, chess.F6
+        ]:
+            score += color * 10
+
+        # Pawn structure tracking
+        if pt == chess.PAWN:
+            f = chess.square_file(square)
+            if piece.color == chess.WHITE:
+                pawn_files_white.setdefault(f, 0)
+                pawn_files_white[f] += 1
+            else:
+                pawn_files_black.setdefault(f, 0)
+                pawn_files_black[f] += 1
+
+        # Knight outpost
+        if pt == chess.KNIGHT and not board.is_attacked_by(not piece.color, square):
+            rank = chess.square_rank(square)
+            if (piece.color == chess.WHITE and rank >= 4) or \
+               (piece.color == chess.BLACK and rank <= 3):
+                score += color * 25
+
+        # Bishop pair
+        if pt == chess.BISHOP:
+            if len([p for p in board.piece_map().values()
+                    if p.piece_type == chess.BISHOP and p.color == piece.color]) == 2:
+                score += color * 15
+
+        # Rooks on open file
+        if pt == chess.ROOK:
+            file = chess.square_file(square)
+            pawn_in_file = any(
+                board.piece_at(chess.square(file, r)) and
+                board.piece_at(chess.square(file, r)).piece_type == chess.PAWN
+                for r in range(8)
+            )
+            if not pawn_in_file:
+                score += color * 20
+
+    # =============================================
+    # 2. PAWN STRUCTURE PENALTIES
+    # =============================================
+    doubled = 15
+    isolated = 20
+
+    for f, count in pawn_files_white.items():
+        if count > 1:
+            score -= doubled * (count - 1)
+        if f - 1 not in pawn_files_white and f + 1 not in pawn_files_white:
+            score -= isolated
+
+    for f, count in pawn_files_black.items():
+        if count > 1:
+            score += doubled * (count - 1)
+        if f - 1 not in pawn_files_black and f + 1 not in pawn_files_black:
+            score += isolated
+
+    # =============================================
+    # 3. MOBILITY
+    # =============================================
     my_moves = board.legal_moves.count()
     board.push(chess.Move.null())
     opp_moves = board.legal_moves.count()
     board.pop()
 
-    score += 5 * (my_moves - opp_moves)
+    score += 2 * (my_moves - opp_moves)
 
-    # Castling bonus
+    # =============================================
+    # 4. TACTICAL AWARENESS
+    # =============================================
+    for square, piece in board.piece_map().items():
+        color = piece.color
+        enemy = not color
+        val = piece_value(piece)
+
+        att = attacked_by_white if color == chess.WHITE else attacked_by_black
+        defd = defended_by_white if color == chess.WHITE else defended_by_black
+
+        enemy_att = attacked_by_black if color == chess.WHITE else attacked_by_white
+        enemy_def = defended_by_black if color == chess.WHITE else defended_by_white
+
+        # 4.1 Hanging pieces (attacked but not defended)
+        if enemy_att[square] and not defd[square]:
+            score += (-val * 0.8) if color == chess.WHITE else (val * 0.8)
+
+        # 4.2 Loose pieces (undefended)
+        if not defd[square]:
+            score += (-25) if color == chess.WHITE else (25)
+
+        # 4.3 Pinned pieces (to king)
+        king_sq = board.king(color)
+        if board.is_pinned(color, square) and piece.piece_type != chess.KING:
+            score += (-40) if piece.color == chess.WHITE else (40)
+
+        # 4.4 Overloaded defenders
+        defended_targets = [
+            sq for sq in range(64)
+            if enemy_att[sq] and defd[sq]
+        ]
+        if len(defended_targets) >= 2:
+            score += (-20) if color == chess.WHITE else (20)
+
+        # 4.5 Simple fork detection (piece attacked twice, defended once)
+        if enemy_att[square] and (not defd[square] or enemy_att[square] > defd[square]):
+            score += (-val * 0.3) if color == chess.WHITE else (val * 0.3)
+
+        # 4.6 King attack pressure
+        for ksq in [board.king(chess.WHITE), board.king(chess.BLACK)]:
+            if board.is_attacked_by(piece.color, ksq):
+                score += 5 * (1 if piece.color == chess.WHITE else -1)
+
+    # =============================================
+    # 5. KING SAFETY (SIMPLE)
+    # =============================================
     wk = board.king(chess.WHITE)
     bk = board.king(chess.BLACK)
 
     if wk in (chess.G1, chess.C1):
-        score += 40
+        score += 30
     if bk in (chess.G8, chess.C8):
-        score -= 40
+        score -= 30
 
     if board.fullmove_number > 10:
-        if wk in (chess.E1, chess.D1, chess.F1):
-            score -= 30
-        if bk in (chess.E8, chess.D8, chess.F8):
-            score += 30
+        if wk == chess.E1:
+            score -= 20
+        if bk == chess.E8:
+            score += 20
 
+    # =============================================
+    # FINAL: Return from side-to-move perspective
+    # =============================================
     return score if board.turn == chess.WHITE else -score
 
 
@@ -346,12 +547,37 @@ def ordered_moves(board: chess.Board):
 # Negamax Search with Quiescence
 # ============================================
 
+# def negamax(board: chess.Board, depth: int, alpha: float, beta: float) -> int:
+#     """
+#     Negamax with alpha-beta pruning.
+#     Uses static eval + quiescence search at leaf nodes.
+#     Neural net is NOT called here to keep it fast.
+#     """
+#     if depth == 0 or board.is_game_over():
+#         return quiescence(board, alpha, beta, QUIESCENCE_DEPTH)
+
+#     best = -math.inf
+
+#     for move in ordered_moves(board):
+#         board.push(move)
+#         val = -negamax(board, depth - 1, -beta, -alpha)
+#         board.pop()
+
+#         if val > best:
+#             best = val
+#         if val > alpha:
+#             alpha = val
+#         if alpha >= beta:
+#             break
+
+#     return best
+
 def negamax(board: chess.Board, depth: int, alpha: float, beta: float) -> int:
-    """
-    Negamax with alpha-beta pruning.
-    Uses static eval + quiescence search at leaf nodes.
-    Neural net is NOT called here to keep it fast.
-    """
+    global NODES_SEARCHED, NODES_PRUNED
+
+    # Count this node
+    NODES_SEARCHED += 1
+
     if depth == 0 or board.is_game_over():
         return quiescence(board, alpha, beta, QUIESCENCE_DEPTH)
 
@@ -366,10 +592,14 @@ def negamax(board: chess.Board, depth: int, alpha: float, beta: float) -> int:
             best = val
         if val > alpha:
             alpha = val
+
+        # Count pruned nodes
         if alpha >= beta:
+            NODES_PRUNED += 1
             break
 
     return best
+
 
 
 # ============================================
@@ -377,7 +607,7 @@ def negamax(board: chess.Board, depth: int, alpha: float, beta: float) -> int:
 # ============================================
 
 class AIPlayer:
-    def __init__(self, depth: int = 3):
+    def __init__(self, depth: int = 5): # can change the depth
         self.depth = depth
 
     def choose_move(self, board: chess.Board) -> chess.Move | None:
@@ -401,6 +631,8 @@ class AIPlayer:
             blended_score = static_score
 
             if USE_NN:
+                global NN_EVAL_COUNT
+                NN_EVAL_COUNT += 1
                 fen_key = board.board_fen()
                 nn_raw = nn_eval_cached(fen_key)     # [-1, 1] from White POV
                 nn_cp = nn_raw * 2000.0              # to centipawns
@@ -426,6 +658,7 @@ class AIPlayer:
 # ============================================
 
 def main():
+    global NODES_SEARCHED, NODES_PRUNED, NN_EVAL_COUNT
     pygame.init()
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
     pygame.display.set_caption("Chess AI + NN + Quiescence")
@@ -444,7 +677,7 @@ def main():
     running = True
 
     while running:
-        clock.tick(60)
+        #clock.tick(60)
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -500,6 +733,17 @@ def main():
             mv = ai.choose_move(board)
             if mv:
                 board.push(mv)
+                # Print metrics for debugging
+                print(f"Nodes searched: {NODES_SEARCHED:,}")
+                print(f"Nodes pruned:   {NODES_PRUNED:,}")
+                print(f"NN eval count:  {NN_EVAL_COUNT:,}")
+                print("-" * 40)
+
+                # Reset counters for next move
+                NODES_SEARCHED = 0
+                NODES_PRUNED = 0
+                NN_EVAL_COUNT = 0
+
 
         # Draw
         if not promoting:
